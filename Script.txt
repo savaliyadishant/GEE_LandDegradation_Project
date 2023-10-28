@@ -1,0 +1,181 @@
+// This Script File for google Earth Engine
+
+Map.addLayer(geometry)
+var dem = ee.Image("USGS/SRTMGL1_003");
+var rgbVis = {
+  min: 0.0,
+  max: 3000,
+  bands: ['elevation'],
+};
+print(dem.getInfo());
+Map.addLayer(dem.clip(geometry), rgbVis, 'DEM');
+var slope = ee.Terrain.slope(dem);
+print(slope.getInfo());
+var rgbVis = {
+  bands: ['slope'],
+};
+Map.addLayer(slope.clip(geometry),rgbVis,'Slope');
+var aspect = ee.Terrain.aspect(dem);
+var rgbVis = {
+  bands: ['aspect'],
+};
+Map.addLayer(aspect.clip(geometry),rgbVis,'aspect');
+var mTPI=ee.Image("CSP/ERGo/1_0/Global/SRTM_mTPI");
+print(mTPI.getInfo());
+var rgbVis = {
+  bands: ['elevation'],
+};
+Map.addLayer(mTPI.clip(geometry),rgbVis,'mTPI');
+var image_Landforms = ee.Image("CSP/ERGo/1_0/Global/SRTM_landforms");
+var rgbVis={
+  bands:['constant']
+}
+Map.addLayer(image_Landforms.clip(geometry),rgbVis,'LandForms');
+//LAI
+var landsat = ee.ImageCollection('COPERNICUS/S2')
+    .filterBounds(geometry)
+    .filterDate('2020-12-15', '2020-12-31')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)) // Cloud cover less than 30%
+    .median();
+landsat=landsat.clip(geometry);
+var ndvi = landsat.normalizedDifference(['B5', 'B4']);
+var evi = landsat.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
+    {
+        'NIR': landsat.select('B8'), // Near Infrared
+        'RED': landsat.select('B4'), // Red
+        'BLUE': landsat.select('B2') // Blue
+    }
+);
+var calculateLAI = function(image) {
+  var lai = image.expression(
+    '2.5 * ((EVI - 0.2) / (0.5 - 0.2))',
+    {
+      'EVI': evi
+    }
+  );
+  return lai.rename('LAI');
+};
+var lai = calculateLAI(landsat);
+var rgbVis={
+  bands:['LAI']
+}
+Map.addLayer(lai,rgbVis,'LAI');
+//FAPAR
+var fapar = landsat.expression(
+    '(NIR - RED) / (NIR + RED)',
+    {
+        'NIR': landsat.select('B5'), // Near Infrared
+        'RED': landsat.select('B4')  // Red
+    }
+).rename('FAPAR');
+print(fapar.getInfo());
+var rgbVis={
+  bands:['FAPAR']
+}
+Map.addLayer(fapar,rgbVis,'FAPAR');
+
+var ndvi = landsat.normalizedDifference(['B5', 'B4']).rename('NDVI');
+var calculateFVC = function(image) {
+  var fvc = image.expression(
+    '0.1511 + 0.4792 * NDVI',
+    {
+      'NDVI': image.select('NDVI')
+    }
+  );
+  return fvc.rename('FVC');
+};
+var fvc = calculateFVC(ndvi);
+print(fvc.getInfo());
+var rgbVis={
+  bands:['FVC']
+}
+Map.addLayer(fvc,rgbVis,'FVC');
+//CCC
+var cri = landsat.expression(
+    'B5 / B4',
+    {
+        'B5': landsat.select('B5'), // Near Infrared
+        'B4': landsat.select('B4')  // Red
+    }
+).rename('CRI');
+var calculateCCC = function(image) {
+  var ccc = image.expression(
+    '1000 * (1 - CRI)',
+    {
+      'CRI': image.select('CRI')
+    }
+  );
+  return ccc.rename('CCC');
+};
+var ccc = calculateCCC(cri);
+print(ccc.getInfo());
+var rgbVis={
+  bands:['CCC']
+}
+Map.addLayer(ccc,rgbVis,'CCC');
+//CWC
+var ndwi = landsat.normalizedDifference(['B3', 'B5']).rename('NDWI');
+var calculateCWC = function(image) {
+  var cwc = image.expression(
+    '1.5 * (NDWI + 0.1)',
+    {
+      'NDWI': image.select('NDWI')
+    }
+  );
+  return cwc.rename('CWC');
+};
+var cwc = calculateCWC(ndwi);
+var rgbVis = {
+  bands: ['CWC'],
+};
+Map.addLayer(cwc,rgbVis,'CWC');
+//temperature
+var modisLST = ee.ImageCollection('MODIS/061/MOD11A1')
+  .filterBounds(geometry)
+  .filterDate('2020-06-01', '2021-12-31')
+  .select('LST_Day_1km'); // Rename bands for clarity
+var meanTemperature = modisLST.mean().rename('MeanTemperature');
+meanTemperature = meanTemperature.multiply(0.02).subtract(273.15);
+meanTemperature = meanTemperature.clip(geometry);
+print(meanTemperature.getInfo());
+var rgbVis = {
+  bands: ['MeanTemperature'],
+};
+Map.addLayer(meanTemperature,rgbVis,'MeanTemperature');
+//Seasonality
+var modisLST = ee.ImageCollection('MODIS/061/MOD11A1')
+  .filterBounds(geometry)
+  .filterDate('2021-01-01', '2021-12-31')
+  .select(['LST_Day_1km', 'LST_Night_1km'], ['Day', 'Night']);
+var calculateTemperatureSeasonality = function(month) {
+  var monthlyLST = modisLST.filter(ee.Filter.calendarRange(month, month, 'month'));
+  var maxTemp = monthlyLST.select('Day').max();
+  var minTemp = monthlyLST.select('Night').min();
+  var seasonality = maxTemp.subtract(minTemp).rename('TemperatureSeasonality');
+  return seasonality.set('month', month);
+};
+var months = ee.List.sequence(1, 12);
+var temperatureSeasonality = ee.ImageCollection.fromImages(months.map(calculateTemperatureSeasonality));
+temperatureSeasonality = temperatureSeasonality.map(function(image) {
+  return image.clip(geometry);
+});
+var rgbVis = {
+  bands: ['TemperatureSeasonality'],
+};
+Map.addLayer(temperatureSeasonality,rgbVis,'TemperatureSeasonality');
+var composite=dem.addBands(slope).addBands(aspect).addBands(mTPI).addBands(image_Landforms).addBands(lai).addBands(fapar).addBands(fvc).addBands(ccc).addBands(cwc).addBands(meanTemperature).addBands(temperatureSeasonality.mean());
+var gcps = High.merge(Low).merge(Medium);
+var training = composite.sampleRegions({
+  collection: gcps, 
+  properties: ['landcover'], 
+  scale: 10
+});
+var classifier = ee.Classifier.smileRandomForest(50).train({
+  features: training,  
+  classProperty: 'landcover', 
+  inputProperties: composite.bandNames()
+});
+var classified = composite.classify(classifier);
+var palette = ['#ff0702', '#0b4a8b','#00ff8f'];
+Map.addLayer(classified.clip(geometry), {min: 0, max: 2, palette: palette}, 'Prediction');
